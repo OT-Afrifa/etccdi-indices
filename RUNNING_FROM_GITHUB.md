@@ -1,7 +1,7 @@
 # Computing an ETCCDI index from this repository
 
-Anyone with access to the Reflective Cloud Hub can compute any of the eight
-percentile indices without writing code, using `compute_any_index.ipynb`.
+Anyone with access to the Reflective Cloud Hub can compute any of the twelve
+percentile-based and fixed threshold indices without writing code, using `compute_any_index.ipynb`.
 
 ## 1. Clone the repository on the hub
 
@@ -30,7 +30,7 @@ Only the USER CHOICES cell needs editing:
     MODELS    = ['CESM']    # 'CESM', 'UKESM', 'MIROC', 'E3SM'
     SCENARIO  = 'HiLLA'     # 'SSP245', 'SAI', 'HiLLA'
     MEMBERS   = None        # None = all available
-    FREQ      = 'YS'        # 'YS' annual, 'MS' monthly (seasonal cycle)
+    FREQ      = 'YS'        # 'YS' annual (default), 'MS' monthly, 'QS-DEC' (seasonal cycle)
 
 Then Run All. The notebook prints what it is loading, computes the index, and
 plots the ensemble mean.
