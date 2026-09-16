@@ -2,9 +2,7 @@
 multimodel_etccdi.py
 
 Core pipeline for the multi-model ETCCDI extremes analysis of G6-1.5K-SAI and
-G6-1.5K-HiLLA (deliverables D1/D2). Extracted from
-multimodel_etccdi_indices_edited_0627.ipynb so demo notebooks import it instead
-of carrying the definitions themselves.
+G6-1.5K-HiLLA (deliverables D1/D2). 
 
 Contents: run configuration (Period, ComparisonConfig, windows), per-model
 bucket layouts and native-variable converters (pr, tasmax, tasmin, tas, psl,
@@ -14,7 +12,7 @@ land masking, and the summary plotting kept for analysis notebooks:
 plot_all_mod_comparisons, plot_contrast_summary, contrast_table,
 plot_medit_contrast_bars.
 
-Written by Francis Osei Tutu Afrifa, 2026. Reflective internship, Track A.
+Written by Francis Osei Tutu Afrifa, 2026.
 """
 
 # Written by Francis Osei Tutu Afrifa, 2026
@@ -174,6 +172,19 @@ All SSP245 runs extend past 2084.
 BASELINE   = Period('baseline',   2020, 2039)
 ASSESSMENT = Period('assessment', 2065, 2084)
 
+# Per-model percentile baseline. MIROC-ES2H SSP2-4.5 begins in 2020: Shingo
+# confirmed (September 2026) that 2015-2019 was never run, because the 2020
+# SSP2-4.5 was initialised separately from combined prior runs plus a short
+# spin-up. Its window is therefore 15 years against 20, so its day-of-year
+# percentiles rest on 75 samples against 100. The gap is widest for R99p, where
+# only wet days enter the estimate.
+BASELINE_BY_MODEL = {
+    'CESM':  Period('baseline', 2015, 2034),
+    'UKESM': Period('baseline', 2015, 2034),
+    'MIROC': Period('baseline', 2020, 2034),
+    'E3SM':  Period('baseline', 2015, 2034),
+}
+
 # Per-model assessment window. CESM is 2050-2069 because its SSP245 members
 # r7-r10 end in 2070 (Alistair: use the last 20 years all members share). The
 # others keep the 2065-2084 default. Note for later: E3SM G6-1.5K-SAI tasmax
@@ -187,6 +198,17 @@ ASSESSMENT_BY_MODEL = {
 }
 
 SAI_WINDOW = Period('assessment', 2050, 2069)   # common to all four models' SAI runs
+
+def baseline_for(model):
+    """
+    Percentile baseline for a model. BASELINE remains the 2020-2039 window
+    the existing archive was built on; this table is the newer one, and callers
+    ask for it explicitly rather than getting it by default, so nothing already
+    written changes basis without someone deciding to.
+    
+    """
+    return BASELINE_BY_MODEL[model]
+
 
 def assessment_for(model):
     """
@@ -1259,8 +1281,8 @@ def compute_baseline_threshold(model, variable, percentile, baseline_period,
 # ============================================================================
 # SECTION 11  -  Index computation, ensemble mean, significance
 # ============================================================================
-def compute_index_for_members(data_dict, index_name, threshold, period,
-                              freq='YS'):
+def compute_index_for_members(data_dict, index_name, threshold, 
+                              period, freq='YS', season='DJF'):
     """
     Climatological index field per member, reduced over the window.
     {member: DataArray}.
@@ -1283,7 +1305,8 @@ def compute_index_for_members(data_dict, index_name, threshold, period,
     info = INDEX_REGISTRY[index_name]
     fn, thresh_kw, extra, var_kw = (info['xclim_fn'], info['threshold_kwarg'],
                                     info['extra_kwargs'], info['variable'])
-    _check_freq(index_name, freq)
+    
+    _check_freq(index_name, freq, season)
     per_member = {}
     for m, data in data_dict.items():
         window = data.sel(time=period.slice())
@@ -1308,24 +1331,25 @@ def compute_index_for_members(data_dict, index_name, threshold, period,
                                                              keep_attrs=True))
         '''
         if freq == 'YS':
-            per_member[m] = idx.mean('time', keep_attrs=True)
+            # per_member[m] = idx.mean('time', keep_attrs=True)
+            complete = _complete_bins(window, 'YS', min_days=360)
+            per_member[m] = idx.where(complete).mean('time', keep_attrs=True)
+            
         elif freq == 'MS':
             per_member[m] = idx.groupby('time.month').mean('time',
                                                            keep_attrs=True)
+        
         else:
-            # 'QS-DEC' bins the year into DJF, MAM, JJA, SON, each stamped with
-            # the first month of its bin, so a DJF bin carries a December stamp
-            # from the preceding year and month == 12 selects the winters.
-            # Both ends of the record hold a partial winter (Jan-Feb of the
-            # first year, December of the last), and xclim returns a value
-            # rather than NaN for a partial bin, so incomplete winters are
-            # masked before averaging. 85 days accepts a complete DJF on the
-            # noleap, 360-day and Gregorian calendars in this ensemble and
-            # rejects both stubs.
-            complete = _complete_bins(window, 'QS-DEC', min_days=85)
+            # QS-DEC bins the year into DJF, MAM, JJA and SON, each stamped with
+            # the first month of its bin, so SEASON_STAMP[season] selects one.
+            # Both ends of the record hold a partial bin and xclim returns a
+            # value rather than NaN for one, so incomplete seasons are masked
+            # before averaging.
+            complete = _complete_bins(window, 'QS-DEC',
+                                      min_days=SEASON_MIN_DAYS)
             idx = idx.where(complete)
-            djf = idx.sel(time=idx['time'].dt.month == 12)
-            per_member[m] = djf.mean('time', keep_attrs=True)
+            sel = idx.sel(time=idx['time'].dt.month == SEASON_STAMP[season])
+            per_member[m] = sel.mean('time', keep_attrs=True)
             
     return per_member
  
@@ -1876,7 +1900,7 @@ def save_nc_to_s3(obj, s3_path):
     finally:
         os.remove(tmp)
 
-
+'''
 def compute_annual_index_for_member(da, index_name, threshold, freq='YS'):
     """
     Annual index field (time, lat, lon) for one member, against a fixed
@@ -1894,16 +1918,57 @@ def compute_annual_index_for_member(da, index_name, threshold, freq='YS'):
     annual = info['xclim_fn'](**kwargs).squeeze(drop=True)
     annual.name = index_name.upper()
     return annual
+'''
+def compute_annual_index_for_member(da, index_name, threshold,
+                                    freq='YS', season=None, min_days=360):
+    """
+    Annual index field (time, lat, lon) for one member, against a fixed
+    baseline percentile. This is compute_index_for_members without the time mean,
+    so every year is kept and the file matches the fixed-index annual files. The
+    singleton 'percentiles' dim xclim attaches is squeezed so the field stacks
+    cleanly into (member, year, lat, lon).
+    
+    """
+    info = INDEX_REGISTRY[index_name]
+    _check_freq(index_name, freq, season)
+    kwargs = {info['variable']: da, 'freq': freq, **info['extra_kwargs']}
+    if info['threshold_kwarg'] is not None:
+        kwargs[info['threshold_kwarg']] = threshold
+    
+    annual = info['xclim_fn'](**kwargs).squeeze(drop=True)
+    # Mask bins the input does not fully cover. Without this a truncated final
+    # year enters the archive as a real year with a count low in proportion to
+    # its missing days: MIROC-ES2H G6-1.5K-HiLLA r02 stops 62 days into 2084 and
+    # UKESM1-1 G6-1.5K-HiLLA r3i1p1f2 has 270 of 360 days of pr in the same
+    # year. 360 accepts a complete year on the 360-day, noleap and Gregorian
+    # calendars present in this ensemble.
+    if freq == 'YS':
+        annual = annual.where(_complete_bins(da, 'YS', min_days=min_days))
+
+    elif freq == 'QS-DEC':
+        annual = annual.where(_complete_bins(da, 'QS-DEC',
+                                             min_days=SEASON_MIN_DAYS))
+        if season is not None:
+            annual = annual.sel(
+                time=annual['time'].dt.month == SEASON_STAMP[season])
+        
+        # A DJF bin is stamped with the December of the preceding year, so the
+        # year label on a DJF series is the year the winter starts, not the year
+        # holding January and February. Recorded in the attributes because the
+        # convention is invisible in the data and a reader will otherwise guess.
+        annual.attrs['season'] = season or 'all'
+        annual.attrs['season_year_convention'] = (
+            'bin stamped with its first month; a DJF value labelled YYYY covers '
+            'Dec YYYY, Jan YYYY+1, Feb YYYY+1')
+
+    annual.name = index_name.upper()
+    return annual
 
 
-def write_index_dataset(model, index_name,
-                        scenarios=('HiLLA', 'SSP245'),
-                        scenario_periods=None,
-                        members_by_scenario=None,
-                        ssp245_threshold_members=None,
-                        output_root=None,
-                        freq='YS',
-                        overwrite=False):
+def write_index_dataset(model, index_name, scenarios=('HiLLA', 'SSP245'),
+                        scenario_periods=None, members_by_scenario=None,
+                        ssp245_threshold_members=None, output_root=None,
+                        freq='YS', season=None, baseline_period=None, overwrite=False):
     """
     Compute one percentile index as per-member annual fields and write them to
         {output_root}/{model_label}/{scenario_label}/{member_label}/{INDEX}.nc
@@ -1914,10 +1979,15 @@ def write_index_dataset(model, index_name,
     peak memory is one member's daily record.
     
     """
-    _check_freq(index_name, freq)
+    _check_freq(index_name, freq, season)
     if output_root is None:
-        output_root = (ETCCDI_OUTPUT_ROOT if freq == 'YS'
-                       else ETCCDI_OUTPUT_ROOT.replace('_annual', '_monthly'))
+        if freq == 'YS':
+            output_root = ETCCDI_OUTPUT_ROOT
+        elif freq == 'MS':
+            output_root = ETCCDI_OUTPUT_ROOT.replace('_annual', '_monthly')
+        else:
+            suffix = (season or 'seasonal').lower()
+            output_root = ETCCDI_OUTPUT_ROOT.replace('_annual', f'_{suffix}')
 
     info = INDEX_REGISTRY[index_name]
     variable = info['variable']
@@ -1934,10 +2004,15 @@ def write_index_dataset(model, index_name,
 
     if ssp245_threshold_members is None:
         ssp245_threshold_members = get_layout(model, 'SSP245')['members']
+
+    if baseline_period is None:
+        baseline_period = BASELINE # unchanged default: 2020-2039
+        
     threshold, baseline_data = compute_baseline_threshold(
         model=model, variable=variable, percentile=info['percentile'],
-        baseline_period=BASELINE, members=ssp245_threshold_members,
+        baseline_period=baseline_period, members=ssp245_threshold_members,
         wet_day_thresh=info.get('wet_day_thresh'))
+    
     del baseline_data
     gc.collect()
 
@@ -1965,10 +2040,22 @@ def write_index_dataset(model, index_name,
             del ds
 
             annual = compute_annual_index_for_member(
-                da, index_name, threshold, freq=freq).load()
+                da, index_name, threshold, freq=freq, season=season).load()
             del da
             gc.collect()
 
+            annual.attrs.update({
+                'percentile_baseline_scenario': 'SSP2-4.5',
+                'percentile_baseline_period':
+                    f'{baseline_period.start_year}-{baseline_period.end_year}',
+                'percentile_baseline_years':
+                    baseline_period.end_year - baseline_period.start_year + 1,
+                'percentile_baseline_members':
+                    ','.join(str(m) for m in ssp245_threshold_members),
+                'percentile_method': 'xclim percentile_doy, 5-day centred '
+                                     'window, averaged across baseline members',
+            })
+            
             save_nc_to_s3(annual, s3_path)
             yrs = annual['time'].dt.year.values
             print(f'  wrote {model_label}/{scen_label}/{member_label}/{idx_file}  '
@@ -1979,6 +2066,8 @@ def write_index_dataset(model, index_name,
 
     print(f'Done {index_name.upper()} for {model_label}: {len(written)} files.')
     return written
+
+    
 # ============================================================================
 # SECTION 15  -  Plotting
 # ============================================================================
@@ -2370,29 +2459,43 @@ def contrast_table(contrast, regions=REGIONS, drop_e3sm_temp=True):
 # so temperature indices run on three models and precipitation on four.
 TEMP_INDICES = {'TX90p', 'TX10p', 'TN90p', 'TN10p'}
 SPELL_INDICES = {'WSDI', 'CSDI', 'GSL'}   # spells/seasons span months: annual only
-# SUPPORTED_FREQ = ('YS', 'MS')      # annual and monthly output resolution
-SUPPORTED_FREQ = ('YS', 'MS', 'QS-DEC')   # annual, monthly, DJF season
+
+SUPPORTED_FREQ = ('YS', 'MS', 'QS-DEC')   # annual, monthly, seasonal
+# QS-DEC stamps each seasonal bin with the first month of the bin, so the stamp
+# month identifies the season. DJF is the only one that straddles a calendar
+# year, carrying the December of the preceding year.
+SEASON_STAMP = {'DJF': 12, 'MAM': 3, 'JJA': 6, 'SON': 9}
+SEASON_MIN_DAYS = 85      # every complete season is 90-92 days on every
+                          # calendar here; the largest partial stub is 59
 
 
-def _check_freq(index_name, freq):
+def _check_freq(index_name, freq, season=None):
     """
     Validate an output frequency for an index.
 
-    Annual ('YS'), monthly ('MS') and DJF-season ('QS-DEC') are supported.
-    Spell-length indices
-    are annual-only: their spells can cross month boundaries, so a monthly
-    count is not the ETCCDI quantity.
+    Annual ('YS'), monthly ('MS') and seasonal ('QS-DEC') are supported.
+    Spell-length indices are annual-only: their spells can cross month 
+    boundaries, so a monthly count is not the ETCCDI quantity.
     
     """
     if freq not in SUPPORTED_FREQ:
         raise ValueError(f'freq={freq!r} not supported; use one of '
                          f'{SUPPORTED_FREQ}')
+    
     if freq != 'YS' and index_name in SPELL_INDICES:
         raise ValueError(
             f'{index_name} is spell-based and only defined at annual frequency '
             f'(spells cross month boundaries); freq={freq!r} not supported')
 
-# PRECIP_INDICES = {'R95p', 'R99p'}
+    if season is not None:
+        if freq != 'QS-DEC':
+            raise ValueError(f'season={season!r} applies only to '
+                             f"freq='QS-DEC', not {freq!r}")
+        if season not in SEASON_STAMP:
+            raise ValueError(f'season={season!r} unknown, use one of '
+                             f'{sorted(SEASON_STAMP)}')
+
+
 PRECIP_INDICES = {'R95p', 'R99p', 'RX1D', 'RX5D'}
 
 def MODELS_FOR(idx):
